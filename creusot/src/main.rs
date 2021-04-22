@@ -19,7 +19,6 @@ extern crate rustc_target;
 #[macro_use]
 extern crate log;
 
-use def_path_trie::DefPathTrie;
 use rustc_driver::{abort_on_err, Callbacks, Compilation, RunCompiler};
 use rustc_hir::{def_id::LOCAL_CRATE, Item};
 use rustc_interface::{
@@ -32,7 +31,7 @@ use rustc_middle::{
 };
 use std::{cell::RefCell, env::args as get_args, rc::Rc};
 
-use why3::mlcfg;
+use why3::{declaration::{Module, Decl}, mlcfg};
 
 mod analysis;
 
@@ -160,11 +159,11 @@ fn translate(
         // Parent module of declaration
         let module = util::module_of(tcx, def_id);
         let module_id = tcx.parent_module_from_def_id(def_id.expect_local()).to_def_id();
+        let module = crate::translation::translate_value_id(tcx, module_id   );
         // let module_id = tcx.parent(def_id).unwrap();
         let attrs = tcx.get_attrs(def_id);
         let resolver = specification::RustcResolver(resolver.clone(), module_id, tcx);
 
-        use mlcfg::Decl;
         use specification::Spec::*;
         match specification::spec_kind(attrs).unwrap() {
             Invariant { .. } => continue,
@@ -173,7 +172,8 @@ fn translate(
 
                 let mut translated = specification::logic_to_why(&resolver, &mut ty_ctx, def_id, &body, exp);
                 translated.contract = out_contract;
-                krate.modules.get_mut_with_default(module).decls.push(Decl::LogicDecl(translated));
+
+                krate.modules.add_decl(module, Decl::LogicDecl(translated));
             }
             Program { contract } => {
                 let mut out_contract = contract.check_and_lower(&resolver, &mut ty_ctx, &body);
@@ -189,7 +189,7 @@ fn translate(
                 let translated = FunctionTranslator::new(sess, tcx, &mut ty_ctx, &body, resolver)
                     .translate(def_id, out_contract);
 
-                krate.modules.get_mut_with_default(module).decls.push(Decl::FunDecl(translated));
+                krate.modules.add_decl(module, Decl::FunDecl(translated));
             }
         }
     }
@@ -228,48 +228,29 @@ where
     writeln!(out, "module {}", krate.name)?;
     writeln!(out, "{}\n", IMPORTS)?;
     writeln!(out, "  scope Type")?;
-    for (decl, pred) in krate.types() {
-        let fe = mlcfg::printer::FormatEnv { indent: 2, scope: &["Type".into()] };
+    let (alloc, mut pe) = mlcfg::printer::PrintEnv::new();
+    pe.scopes.push("Type".into());
 
-        writeln!(out, "{}", fe.to(decl))?;
-        writeln!(out, "{}", fe.to(pred))?;
+    for (decl, pred) in krate.types() {
+        // let fe = mlcfg::printer::FormatEnv { indent: 2, scope: &["Type".into()] };
+
+        decl.pretty(&alloc, &mut pe).indent(2).1.render(80, out)?;
+        writeln!(out, "")?;
+        pred.pretty(&alloc, &mut pe).indent(2).1.render(80, out)?;
+        writeln!(out, "")?;
     }
     writeln!(out, "  end")?;
 
-    print_module_tree(out, &mut Vec::new(), &krate.modules).unwrap();
+    // let fe = mlcfg::printer::FormatEnv { indent: 2, scope: &[] };
+    let (alloc, mut pe) = mlcfg::printer::PrintEnv::new();
+
+    for decl in krate.modules.reify() {
+        decl.pretty(&alloc, &mut pe).indent(2).1.render(80, out)?;
+        writeln!(out, "")?;
+    }
+    // print_module_tree(out, &mut Vec::new(), &krate.modules).unwrap();
     writeln!(out, "end")?;
 
-    Ok(())
-}
-fn print_module_tree<W>(
-    out: &mut W,
-    open_scopes: &mut Vec<String>,
-    mod_tree: &DefPathTrie<mlcfg::Module>,
-) -> std::io::Result<()>
-where
-    W: Write,
-{
-    use heck::CamelCase;
-
-    let indent_level = (open_scopes.len() + 1) * 2;
-
-    for (k, child) in mod_tree.children_with_keys() {
-        let scope_name = k.to_string()[..].to_camel_case();
-
-        writeln!(out, "{:ident$}scope {}", "", scope_name, ident = indent_level)?;
-        open_scopes.push(scope_name);
-        print_module_tree(out, open_scopes, child)?;
-        open_scopes.pop();
-        writeln!(out, "{:ident$}end", "", ident = indent_level)?;
-    }
-
-    let fe = mlcfg::printer::FormatEnv { indent: indent_level, scope: &open_scopes[..] };
-
-    let module = mod_tree.value().unwrap();
-
-    for func in &module.decls {
-        writeln!(out, "{}", fe.to(func))?;
-    }
     Ok(())
 }
 
